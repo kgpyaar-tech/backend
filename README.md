@@ -2,6 +2,10 @@
 
 The backend of the application.
 
+# Credits
+
+Credits to [Puppy Love Project](https://github.com/pclubiitk/puppy-love), built by [Programming Club IIT Kanpur](https://pclub.in/) for the Algorithm and Idea.
+
 ## Dev instructions
 * Install [virtualenv](https://pypi.org/project/virtualenv/) if not done
 `pip install virtualenv`
