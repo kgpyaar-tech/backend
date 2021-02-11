@@ -20,6 +20,7 @@ from flask_jwt_extended import (
     jwt_required,
     verify_jwt_in_request,
 )
+from mailer import Mailer
 from mongoengine import connect
 from pymongo import MongoClient
 from sendgrid import SendGridAPIClient
@@ -66,17 +67,15 @@ def handle_register():
     Format of the request json
     {
         "email": <user_email>
-        "altEmail" : <alternate email>
     }
     """
     if not request.is_json:
         return jsonify(message="request data is not a json format"), 415
 
     user_email = request.json["email"].lower()
-    alt_email = request.json["altEmail"]
 
     # Check if domain of email is iitkgp.ac.in
-    pattern = re.compile("^[a-zA-Z0-9](.?[a-zA-Z0-9_-]){5,}@(kgpian.)?iitkgp.ac.in$")
+    pattern = re.compile("/^[a-zA-Z0-9](.?[a-zA-Z0-9_-]){3,}@(kgpian.)?iitkgp.ac.in$/i")
     if not pattern.match(user_email):
         return jsonify(message="email is not valid"), 401
 
@@ -84,38 +83,31 @@ def handle_register():
 
     # Check if user is present in the db, if not return error
     if not user_data:
-        return (
-            jsonify(
-                message="user email not in registered iitkgp database, please contact us at kgpyaar@gmail.com"
-            ),
-            401,
+        roll_number = ""
+        year = ""
+        department = ""
+        email = user_email
+        sent_hearts = []
+        request_time_window = []
+        is_registered = False
+        name = ""
+        verify_hash = ""
+        db.user.insert_one(
+            {
+                "public_key": "",
+                "nickname": "",
+                "name": name,
+                "email": email,
+                "year": year,
+                "department": department,
+                "sent_hearts": sent_hearts,
+                "request_time_window": request_time_window,
+                "is_registered": is_registered,
+                "verify_hash": verify_hash,
+            }
         )
-        # roll_number = ""
-        # year = ""
-        # department = ""
-        # email = user_email
-        # sent_hearts = []
-        # request_time_window = []
-        # is_registered = False
-        # name = ""
-        # verify_hash = ""
-        # db.user.insert_one(
-        #     {
-        #         "public_key": "",
-        #         "nickname": "",
-        #         "name": name,
-        #         "email": email,
-        #         "year": year,
-        #         "department": department,
-        #         "sent_hearts": sent_hearts,
-        #         "request_time_window": request_time_window,
-        #         "is_registered": is_registered,
-        #         "verify_hash": verify_hash,
-        #     }
-        # )
 
-    # user_data = db.user.find_one({"email": user_email})
-    # Uncomment this later
+    user_data = db.user.find_one({"email": user_email})
     if user_data["is_registered"]:
         return jsonify(message="You have already registered"), 302
 
@@ -130,27 +122,33 @@ def handle_register():
     new_value = {"$set": {"verify_hash": verify_hash}}
     db.user.update_one(Filter, new_value)
 
+    # body = """
+    # <h2> Thanks for registering to KGPyaar! </h2>
+    # <p>Verification Link: {0}</p>
+    # <p>For issues with registration, contact us at kgpyaar@gmail.com</p>
+    # """.format(
+    #     verify_link
+    # )
+    # message = Mail(
+    #     from_email=KGPYAAR_EMAIL,
+    #     to_emails=alt_email,
+    #     subject=subject,
+    #     html_content=body,
+    # )
+    # sg = SendGridAPIClient(SENDGRID_KEY)
+
     subject = "Verification link for KGPyaar"
-    body = """
-	<h2> Thanks for registering to KGPyaar! </h2>
-	<p>Verification Link: {0}</p>
-	<p>For issues with registration, contact us at kgpyaar@gmail.com</p>
-	""".format(
-        verify_link
-    )
-    message = Mail(
-        from_email=KGPYAAR_EMAIL,
-        to_emails=alt_email,
-        subject=subject,
-        html_content=body,
-    )
-    sg = SendGridAPIClient(SENDGRID_KEY)
-    # SendGrid raises error, in case of failed sent emails
-    # Catch the error and log the error for debug
+    mail = Mailer(email=os.getenv("MAIL_ADDRESS"), password=os.getenv("MAIL_PASSWORD"))
     try:
-        response = sg.send(message)
+        mail.send(
+            receiver=user_email,
+            subject=subject,
+            message="Thank you for registering on KGPyaar, please open the following link in your browser: {}".format(
+                verify_link
+            ),
+        )
     except Exception as e:
-        LOG.error("SendGrid Error: {0}".format(e))
+        LOG.error("/Mail Error: {0}".format(e))
         return jsonify(message="sendgrid issue, please try again later"), 500
 
     return jsonify(message="verify link successfully sent"), 200
@@ -254,6 +252,7 @@ def handle_login():
             nickname=user_data["nickname"],
             email=user_data["email"],
             jwt=access_token,
+            contact_details=user_data["contact_details"],
             encryptedPrivateKey=user_data["encrypted_private_key"],
             serializedPublicKey=user_data["public_key"],
         )
@@ -280,8 +279,8 @@ def add_heart():
     Format of the request json
     {
         "data" : "<some string>,
-        "love_number" : "<some string>"
         "sha256" : <sha256 stringified>
+        "encryptedContactDetails": "<encryptedContactDetails>"
     }
     """
     """
@@ -300,22 +299,23 @@ def add_heart():
     # Lets add the user's vote!
 
     req_data = request.json["data"]
-    love_number = request.json["love_number"]
+    # love_number = request.json["love_number"]
 
     user_data = db.user.find_one({"email": identity})
 
     sent_hearts_data = user_data["sent_hearts"]
     sha256 = request.json["sha256"]
+    encryptedContactDetails = request.json["encryptedContactDetails"]
 
     # Check if user has already voted
     # import pdb; pdb.set_trace()
     for data in sent_hearts_data:
         if sha256 == data["sha256"]:
-            return jsonify(message="user has already added heart"), 401
+            return jsonify(message="You have already sent heart to this person"), 409
 
     # Check if user has not exceeded MAX_HEART_COUNT votes
     if len(sent_hearts_data) + 1 > MAX_HEART_COUNT:
-        return jsonify(message="user has voted for maximum people"), 401
+        return jsonify(message="You can't send hearts to more than 4 people"), 405
 
     final_data = {"encrypted_data": req_data, "sha256": sha256}
     # Add in the vote
@@ -323,13 +323,20 @@ def add_heart():
 
     Filter = {"email": identity}
     new_value = {"$set": {"sent_hearts": sent_hearts_data}}
+    db.user.update_one(Filter, new_value)
 
+    try:
+        current_enc_contact = user_data["encrypted_contact_details"]
+    except:
+        current_enc_contact = []
+    current_enc_contact.append(encryptedContactDetails)
+    new_value = {"$set": {"encrypted_contact_details": current_enc_contact}}
     db.user.update_one(Filter, new_value)
 
     # Add the love number
-    db.global_love_number_map.insert_one({"love_number": love_number})
+    db.global_love_number_map.insert_one({"love_number": sha256})
 
-    return jsonify(message="heart successfully sent"), 200
+    return jsonify(message="Heart successfully sent"), 200
 
 
 # Remove the heart count for the sender
@@ -340,8 +347,6 @@ def remove_heart():
     """
     Format of the request json
     {
-        "data" : "<some string>,
-        "love_number" : "<some string>"
         "sha256" : <sha256 stringified>
     }
     """
@@ -356,8 +361,7 @@ def remove_heart():
 
     # Let's remove the user's vote!
 
-    req_data = request.json["data"]
-    love_number = request.json["love_number"]
+    sha256 = request.json["sha256"]
 
     user_data = db.user.find_one({"email": identity})
     sent_hearts_data = user_data["sent_hearts"]
@@ -368,19 +372,22 @@ def remove_heart():
 
     # Check if the vote is present in the sent_heart
     isPresent = False
-    for data in user_data["sent_hearts"]:
-        if data["sha256"] == request.json["sha256"]:
-            isPos = True
+    index_to_be_removed = 0
+    for index, data in enumerate(sent_hearts_data):
+        if data["sha256"] == sha256:
+            isPresent = True
+            index_to_be_removed = index
             break
 
     if not isPresent:
-        return jsonify(message="user has not voted for the person"), 401
+        return jsonify(message="User has not voted for the person"), 401
 
     # Remove the love number
-    db.global_love_number_map.delete_one({"love_number": love_number})
+    db.global_love_number_map.delete_one({"love_number": sha256})
 
     # Remove the vote
-    sent_hearts_data.remove({"encrypted_data": req_data, "sha256": sha256})
+    # sent_hearts_data.remove({"encrypted_data": req_data, "sha256": sha256})
+    del sent_hearts_data[index_to_be_removed]
 
     Filter = {"email": identity}
     new_value = {"$set": {"sent_hearts": sent_hearts_data}}
@@ -466,7 +473,7 @@ def search():
                 identity, datetime.now()
             )
         )
-        return jsonify(message="max request count has reached, please try sometime later"), 401
+        return jsonify(message="max request count has reached, please try sometime later"), 429
 
     # Update the latest timestamp of the request made
     Filter = {"email": identity}
@@ -476,7 +483,7 @@ def search():
     # Return the search result
     name, department, year = request.json["name"], request.json["department"], request.json["year"]
     if name == "":
-        return jsonify(message="name parameter for search is empty"), 401
+        return jsonify(message="name parameter for search is empty"), 400
 
     if department == "" or year == "":
         department = bson.regex.Regex(".*") if department == "" else department
@@ -507,19 +514,36 @@ def search():
     return jsonify(output), 200
 
 
-@app.route("/get_freq/<data>")
-def get_frequency_heart(data):
+@app.route("/get_freq", methods=["POST"])
+@jwt_required
+def get_frequency_heart():
     """
     Get the frequency of the love number provided.
     The function would return the count of the data
     This is secure because, we don't track the JWT
     of the user
-
+    {
+        "sha256": <sha256>
+    }
     """
-    love_number = data
-    count = db.global_love_number_map.find({"love_number": love_number}).count()
+    return jsonify(message="Thambha"), 200
+    # if not request.is_json:
+    #     return jsonify(message="request data is not a json format"), 415
 
-    return jsonify(frequency=count), 200
+    # # Check the identity of the Token
+    # identity = get_jwt_identity()
+    # if identity is None:
+    #     return jsonify(message="Auth Token is invalid"), 401
+
+    # user_data = db.user.find_one({"email": identity})
+    # sent_hearts = user_data["sent_hearts"]
+    # sha256 = request.json["sha256"]
+    # # check by SHA256 of love_number that the user is requesting freq of only his sent hearts
+    # for heart in sent_hearts:
+    #     if sha256 == heart["sha256"]:
+    #         count = db.global_love_number_map.find({"love_number": sha256}).count()
+    #         return jsonify(frequency=count), 200
+    # return jsonify(message="It seems you are sending the wrong data"), 401
 
 
 @app.route("/get_sent_hearts")
@@ -534,6 +558,43 @@ def get_sent_hearts():
     heart_sent_list = user_data["sent_hearts"]
 
     return jsonify(heart_sent_list), 200
+
+
+@app.route("/enc_contact", methods=["POST"])
+@jwt_required
+def get_crush_contact():
+    """
+    {
+        "public_key": <public_key_of_crush>
+        "sha256": <sha256 of the love_number>
+    }
+    """
+    return jsonify(message="Thambha"), 200
+    # identity = get_jwt_identity()
+
+    # if identity is None:
+    #     return jsonify(message="Auth Token is invalid"), 401
+
+    # public_key = request.json["public_key"]
+    # sha256 = request.json["sha256"]
+
+    # user_data = db.user.find_one({"email": identity})
+    # isPresent = False
+    # for data in user_data["sent_hearts"]:
+    #     if data["sha256"] == sha256:
+    #         isPresent = True
+    #         break
+
+    # if not isPresent:
+    #     return jsonify(message="User has not voted for the person"), 401
+
+    # crush = db.user.find_one({"public_key": public_key})
+    # try:
+    #     encryptedContact = crush["encrypted_contact_details"]
+    # except:
+    #     encryptedContact = []
+
+    # return jsonify(encryptedContact=encryptedContact), 200
 
 
 if __name__ == "__main__":
